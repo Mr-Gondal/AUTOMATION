@@ -1,0 +1,40 @@
+name: Daily Scholarship Finder
+
+on:
+  schedule:
+    # Runs daily at 03:00 UTC = 8:00 AM Pakistan Time
+    - cron: '0 3 * * *'
+  workflow_dispatch: # Allow manual run
+
+jobs:
+  find-scholarships:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+      
+      - name: Run scholarship finder
+        env:
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scholarship_finder.py
+      
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: scholarship-results
+          path: today_results.json
+          retention-days: 7
