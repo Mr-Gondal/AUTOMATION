@@ -8,6 +8,7 @@ Features:
 - Filters for Master's/MPhil + your fields
 - Extracts detailed info: country, university, deadline, funding amount
 - Sends rich Email + Telegram digest with full details
+- Filters out expired scholarships
 """
 
 import os
@@ -118,6 +119,19 @@ def extract_university(text, title, body):
     
     return "Not specified"
 
+def is_deadline_valid(deadline_str):
+    """Check if deadline is still in the future (not expired)"""
+    if deadline_str == "Check website" or deadline_str == "TBD":
+        return True  # Keep if we can't determine
+    
+    try:
+        deadline_date = datetime.strptime(deadline_str, '%B %d, %Y')
+        today = datetime.now()
+        # Keep scholarships with deadlines in the future
+        return deadline_date > today
+    except:
+        return True  # Keep if parsing fails
+
 def extract_deadline(body):
     """Extract deadline date from text"""
     # Common date patterns
@@ -220,8 +234,13 @@ def search_scholarships():
                     if any(ex in text_lower for ex in EXCLUDE_TERMS):
                         continue
                     
-                    seen_urls.add(url)
                     details = extract_scholarship_details(title, body, url)
+                    
+                    # Filter out expired scholarships
+                    if not is_deadline_valid(details['deadline']):
+                        continue
+                    
+                    seen_urls.add(url)
                     results.append(details)
             except Exception as e:
                 print(f"Search error for {keyword}: {e}")
@@ -230,10 +249,12 @@ def search_scholarships():
     curated = get_curated_sources()
     for item in curated:
         if item['url'] not in seen_urls:
-            results.append(item)
-            seen_urls.add(item['url'])
+            # Filter out expired curated items too
+            if is_deadline_valid(item['deadline']):
+                results.append(item)
+                seen_urls.add(item['url'])
     
-    return results[:30]  # top 30
+    return results
 
 def get_curated_sources():
     """Manually curated scholarship pages with full details"""
@@ -405,21 +426,34 @@ def format_html(results):
     return html
 
 def format_telegram(results):
+    """Format results for Telegram - now shows all scholarships (split into multiple messages if needed)"""
     date_str = datetime.now().strftime("%b %d")
+    
+    # Telegram has a limit of ~4096 chars per message, so split if needed
+    messages = []
     msg = f"🛰️ *Scholarship Digest - {date_str}*\n_Master's in Meteorology/Remote Sensing/GIS_\n\n"
     
-    for i, r in enumerate(results[:10], 1):  # Telegram limit
-        title = r['title'][:60] + "..." if len(r['title']) > 60 else r['title']
+    for i, r in enumerate(results, 1):
+        title = r['title'][:55] + "..." if len(r['title']) > 55 else r['title']
         country = r.get('country', 'Intl')
         deadline = r.get('deadline', 'TBD')
         funding = r.get('funding', 'TBD')
         
-        msg += f"{i}. *{title}*\n"
-        msg += f"   📍 {country} | 💰 {funding} | 📅 {deadline}\n"
-        msg += f"   [{r['url']}]({r['url']})\n\n"
+        item_text = f"{i}. *{title}*\n   📍 {country} | 💰 {funding} | 📅 {deadline}\n   [{r['url']}]({r['url']})\n\n"
+        
+        # Check if adding this item would exceed Telegram's limit
+        if len(msg) + len(item_text) > 4000:
+            # Save current message and start a new one
+            messages.append(msg)
+            msg = f"📋 *Scholarships (cont.)*\n\n{item_text}"
+        else:
+            msg += item_text
     
+    # Add footer to last message
     msg += f"_Total found: {len(results)} | Powered by GitHub Actions_"
-    return msg
+    messages.append(msg)
+    
+    return messages
 
 # ============= SENDERS =============
 def send_email(html_content, results):
@@ -449,7 +483,8 @@ def send_email(html_content, results):
         print(f"Email failed: {e}")
         return False
 
-def send_telegram(text):
+def send_telegram(messages):
+    """Send all Telegram messages"""
     token = os.getenv('TELEGRAM_BOT_TOKEN')
     chat_id = os.getenv('TELEGRAM_CHAT_ID')
     
@@ -459,15 +494,22 @@ def send_telegram(text):
     
     try:
         url = f"https://api.telegram.org/bot{token}/sendMessage"
-        payload = {
-            'chat_id': chat_id,
-            'text': text,
-            'parse_mode': 'Markdown',
-            'disable_web_page_preview': False
-        }
-        resp = requests.post(url, json=payload, timeout=10)
-        resp.raise_for_status()
-        print("Telegram sent")
+        
+        # Send each message
+        for text in messages:
+            payload = {
+                'chat_id': chat_id,
+                'text': text,
+                'parse_mode': 'Markdown',
+                'disable_web_page_preview': False
+            }
+            resp = requests.post(url, json=payload, timeout=10)
+            resp.raise_for_status()
+            # Small delay between messages to avoid rate limiting
+            import time
+            time.sleep(0.5)
+        
+        print(f"Telegram sent ({len(messages)} message(s))")
         return True
     except Exception as e:
         print(f"Telegram failed: {e}")
@@ -482,17 +524,17 @@ def main():
         print("No results found today")
         return
     
-    print(f"Found {len(results)} scholarships")
+    print(f"Found {len(results)} active scholarships")
     
     # Save results for debugging
     with open('today_results.json', 'w') as f:
         json.dump(results, f, indent=2)
     
     html = format_html(results)
-    telegram_msg = format_telegram(results)
+    telegram_messages = format_telegram(results)
     
     send_email(html, results)
-    send_telegram(telegram_msg)
+    send_telegram(telegram_messages)
     
     print("Done!")
 
